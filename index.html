@@ -3,90 +3,194 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hand Tracking dengan 3D Object</title>
+    <title>Modern AR 3D Builder - Hand Tracking</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #1a1a1a; color: white; font-family: sans-serif;}
-        #video-container { position: absolute; top: 10px; left: 10px; width: 320px; height: 240px; border: 2px solid #fff; z-index: 10;}
-        #input_video { width: 100%; height: 100%; transform: scaleX(-1); /* Mirror video */ }
-        #canvas-container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1;}
-        #status { position: absolute; top: 260px; left: 10px; z-index: 10; font-weight: bold;}
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        
+        /* Fullscreen Video & Canvas Elements */
+        .fullscreen { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; object-fit: cover; }
+        
+        /* Mirroring for Video and 2D Canvas */
+        .mirror { transform: scaleX(-1); }
+        
+        #video_input { z-index: 1; }
+        #canvas_cv { z-index: 2; pointer-events: none; } /* Canvas for Hand Skeleton */
+        #canvas_3d { z-index: 3; pointer-events: none; } /* Canvas for Three.js */
+        
+        /* Modern Glassmorphism UI */
+        #ui-panel {
+            position: absolute; top: 20px; left: 20px; z-index: 10;
+            background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 12px;
+            padding: 15px 20px; color: #fff; max-width: 300px;
+        }
+        h3 { margin: 0 0 10px 0; font-size: 16px; color: #38bdf8; text-transform: uppercase; letter-spacing: 1px; }
+        p { margin: 5px 0; font-size: 13px; line-height: 1.5; color: #cbd5e1; }
+        .highlight { color: #10b981; font-weight: bold; }
+        #status_indicator { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #f59e0b; margin-right: 8px; }
     </style>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 </head>
 <body>
 
-    <div id="video-container">
-        <video id="input_video" autoplay playsinline></video>
+    <video id="video_input" class="fullscreen mirror" autoplay playsinline></video>
+    <canvas id="canvas_cv" class="fullscreen mirror"></canvas>
+    
+    <div id="ui-panel">
+        <h3>AR Builder v2.0</h3>
+        <p><span id="status_indicator"></span><span id="status_text">Memuat AI Model...</span></p>
+        <p><strong>Cara Pakai:</strong></p>
+        <p>1. Tunjukkan tangan Anda ke kamera.</p>
+        <p>2. Dekatkan <span class="highlight">Jempol & Telunjuk (Mencubit)</span> untuk membuat kubus 3D di udara.</p>
     </div>
-    <div id="status">Memuat AI Model... Mohon tunggu dan izinkan kamera.</div>
-    <div id="canvas-container"></div>
 
     <script>
+        // DOM Elements
+        const videoElement = document.getElementById('video_input');
+        const canvasCV = document.getElementById('canvas_cv');
+        const ctxCV = canvasCV.getContext('2d');
+        const statusText = document.getElementById('status_text');
+        const statusIndicator = document.getElementById('status_indicator');
+
         // ==========================================
-        // 1. SETUP THREE.JS (Membuat Dunia 3D & Kubus)
+        // 1. SETUP THREE.JS (Dunia 3D Modern)
         // ==========================================
         const scene = new THREE.Scene();
-        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+        // Aspect ratio will be updated later
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
         
+        const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
-        document.getElementById('canvas-container').appendChild(renderer.domElement);
+        renderer.domElement.id = 'canvas_3d';
+        renderer.domElement.classList.add('fullscreen');
+        document.body.appendChild(renderer.domElement);
 
-        // Membuat Kubus Wireframe (mirip di video)
-        const geometry = new THREE.BoxGeometry(1, 1, 1);
-        const material = new THREE.MeshBasicMaterial({ color: 0x00ffff, wireframe: true }); // Warna Cyan
-        const cube = new THREE.Mesh(geometry, material);
-        scene.add(cube);
+        camera.position.z = 10;
 
-        camera.position.z = 5;
+        // Kursor/Pointer (Kubus kecil yang mengikuti jari)
+        const pointerGeo = new THREE.BoxGeometry(0.3, 0.3, 0.3);
+        const pointerMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true });
+        const pointer = new THREE.Mesh(pointerGeo, pointerMat);
+        scene.add(pointer);
 
-        // Fungsi Animasi 3D
+        // Array untuk menyimpan kubus yang sudah dibuat
+        const builtCubes = [];
+        let isPinching = false;
+        let lastBuildTime = 0;
+
+        // Fungsi Interpolasi (Lerp) agar gerakan mulus
+        function lerp(start, end, amt) {
+            return (1 - amt) * start + amt * end;
+        }
+
+        // Target posisi dari MediaPipe
+        let targetX = 0;
+        let targetY = 0;
+
         function animate() {
             requestAnimationFrame(animate);
-            // Putar kubus sedikit secara otomatis
-            cube.rotation.x += 0.01;
-            cube.rotation.y += 0.01;
+            
+            // Gerakan kursor mulus (Smooth trailing)
+            pointer.position.x = lerp(pointer.position.x, targetX, 0.2);
+            pointer.position.y = lerp(pointer.position.y, targetY, 0.2);
+            
+            // Putar kursor sedikit
+            pointer.rotation.x += 0.02;
+            pointer.rotation.y += 0.02;
+
+            // Putar kubus-kubus yang sudah dibangun
+            builtCubes.forEach(cube => {
+                cube.rotation.x += 0.005;
+                cube.rotation.y += 0.005;
+            });
+
             renderer.render(scene, camera);
         }
         animate();
 
         // ==========================================
-        // 2. SETUP MEDIAPIPE (Pelacakan Tangan)
+        // 2. SETUP MEDIAPIPE (Computer Vision & Logika Builder)
         // ==========================================
-        const videoElement = document.getElementById('input_video');
-        const statusElement = document.getElementById('status');
-
+        
         function onResults(results) {
-            statusElement.innerText = "Kamera aktif. Tunjukkan tangan Anda!";
+            // Update UI Status
+            statusIndicator.style.backgroundColor = "#10b981"; // Green
+            statusText.innerText = "Sistem Aktif & Melacak";
+
+            // Atur ukuran canvas 2D agar sesuai dengan video
+            canvasCV.width = videoElement.videoWidth;
+            canvasCV.height = videoElement.videoHeight;
             
+            ctxCV.save();
+            ctxCV.clearRect(0, 0, canvasCV.width, canvasCV.height);
+
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-                // Ambil tangan pertama yang terdeteksi
                 const hand = results.multiHandLandmarks[0];
                 
-                // Ambil titik landmark ke-8 (Ujung Jari Telunjuk / Index Finger Tip)
-                const indexFingerTip = hand[8]; 
+                // Gambar Skeleton Tangan di Canvas 2D
+                drawConnectors(ctxCV, hand, HAND_CONNECTIONS, {color: '#ffffff', lineWidth: 2});
+                drawLandmarks(ctxCV, hand, {color: '#38bdf8', lineWidth: 1, radius: 3});
 
-                // MediaPipe mendeteksi koordinat X dan Y dari 0.0 hingga 1.0
-                // Kita harus mengubahnya menjadi koordinat dunia 3D (Three.js)
-                
-                // Rumus konversi sederhana (disesuaikan dengan posisi kamera)
-                // Dikali -1 pada X karena video di-mirror
-                const x = (indexFingerTip.x - 0.5) * -10; 
-                const y = -(indexFingerTip.y - 0.5) * 10; 
+                // Ambil titik Jempol (4) dan Telunjuk (8)
+                const thumbTip = hand[4];
+                const indexTip = hand[8];
 
-                // Pindahkan kubus 3D ke posisi jari telunjuk
-                cube.position.x = x;
-                cube.position.y = y;
+                // Hitung koordinat 3D untuk Three.js (Mapping dari 0..1 ke ruang 3D)
+                // Dikali rasio layar agar pergerakan proporsional
+                const aspect = window.innerWidth / window.innerHeight;
+                // X tidak di-invert (dikali -1) karena Three.js canvas tidak di-mirror CSS, 
+                // tapi video di-mirror. Kita sesuaikan logikanya di sini.
+                targetX = (indexTip.x - 0.5) * -15 * aspect; 
+                targetY = -(indexTip.y - 0.5) * 15;
+
+                // LOGIKA PINCH TO BUILD
+                // Hitung jarak antara jempol dan telunjuk menggunakan Teorema Pythagoras 2D
+                const dx = indexTip.x - thumbTip.x;
+                const dy = indexTip.y - thumbTip.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+
+                // Jika jarak sangat dekat (mencubit)
+                if (distance < 0.05) { 
+                    pointerMat.color.setHex(0xf59e0b); // Berubah warna oranye saat mencubit
+                    
+                    // Batasi pembuatan kubus agar tidak terlalu banyak (Delay 150ms per kubus)
+                    const now = Date.now();
+                    if (now - lastBuildTime > 150) {
+                        spawnCube(pointer.position.x, pointer.position.y);
+                        lastBuildTime = now;
+                    }
+                } else {
+                    pointerMat.color.setHex(0x38bdf8); // Kembali ke biru neon
+                }
+            }
+            ctxCV.restore();
+        }
+
+        // Fungsi membuat kubus baru
+        function spawnCube(x, y) {
+            const geo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
+            const mat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true, transparent: true, opacity: 0.8 });
+            const newCube = new THREE.Mesh(geo, mat);
+            
+            newCube.position.set(x, y, 0);
+            scene.add(newCube);
+            builtCubes.push(newCube);
+
+            // Opsional: Batasi maksimal kubus agar browser tidak crash (Maks 50)
+            if (builtCubes.length > 50) {
+                const oldCube = builtCubes.shift(); // Hapus yang paling lama
+                scene.remove(oldCube);
+                oldCube.geometry.dispose();
+                oldCube.material.dispose();
             }
         }
 
-        // Konfigurasi MediaPipe Hands
+        // Inisialisasi MediaPipe Hands
         const hands = new Hands({locateFile: (file) => {
             return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
         }});
@@ -94,27 +198,26 @@
         hands.setOptions({
             maxNumHands: 1,
             modelComplexity: 1,
-            minDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.5
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
         });
-        
         hands.onResults(onResults);
 
-        // Menyalakan Kamera Webcam
+        // Mulai Kamera
         const cameraUtils = new Camera(videoElement, {
             onFrame: async () => {
                 await hands.send({image: videoElement});
             },
-            width: 640,
-            height: 480
+            width: 1280,
+            height: 720
         });
         cameraUtils.start();
 
-        // Responsif jika layar di-resize
+        // Responsif Resize Layar
         window.addEventListener('resize', () => {
-            renderer.setSize(window.innerWidth, window.innerHeight);
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
         });
     </script>
 </body>
